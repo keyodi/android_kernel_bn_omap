@@ -67,9 +67,15 @@
 #include <linux/syscalls.h>
 #include <linux/capability.h>
 #include <linux/fs_struct.h>
+#include <linux/compat.h>
 #include <linux/uaccess.h>
 
 #include "audit.h"
+
+/* flags stating the success for a syscall */
+#define AUDITSC_INVALID 0
+#define AUDITSC_SUCCESS 1
+#define AUDITSC_FAILURE 2
 
 /* AUDIT_NAMES is the number of slots we reserve in the audit_context
  * for saving names from getname(). */
@@ -1677,8 +1683,7 @@ void audit_finish_fork(struct task_struct *child)
 
 /**
  * audit_syscall_exit - deallocate audit context after a system call
- * @valid: success/failure flag
- * @return_code: syscall return value
+ * @pt_regs: syscall registers
  *
  * Tear down after system call.  If the audit context has been marked as
  * auditable (either because of the AUDIT_RECORD_CONTEXT state from
@@ -1686,13 +1691,17 @@ void audit_finish_fork(struct task_struct *child)
  * message), then write out the syscall information.  In call cases,
  * free the names stored from getname().
  */
-void audit_syscall_exit(int valid, long return_code)
+void __audit_syscall_exit(int success, long return_code)
 {
 	struct task_struct *tsk = current;
 	struct audit_context *context;
 
-	context = audit_get_context(tsk, valid, return_code);
+	if (success)
+		success = AUDITSC_SUCCESS;
+	else
+		success = AUDITSC_FAILURE;
 
+	context = audit_get_context(tsk, success, return_code);
 	if (likely(!context))
 		return;
 
@@ -2496,6 +2505,25 @@ void __audit_mmap_fd(int fd, int flags)
 	context->type = AUDIT_MMAP;
 }
 
+static void audit_log_abend(struct audit_buffer *ab, char *reason, long signr)
+{
+	uid_t auid, uid;
+	gid_t gid;
+	unsigned int sessionid;
+
+	auid = audit_get_loginuid(current);
+	sessionid = audit_get_sessionid(current);
+	current_uid_gid(&uid, &gid);
+
+	audit_log_format(ab, "auid=%u uid=%u gid=%u ses=%u",
+			 auid, uid, gid, sessionid);
+	audit_log_task_context(ab);
+	audit_log_format(ab, " pid=%d comm=", current->pid);
+	audit_log_untrustedstring(ab, current->comm);
+	audit_log_format(ab, " reason=");
+	audit_log_string(ab, reason);
+	audit_log_format(ab, " sig=%ld", signr);
+}
 /**
  * audit_core_dumps - record information about processes that end abnormally
  * @signr: signal value
@@ -2506,10 +2534,6 @@ void __audit_mmap_fd(int fd, int flags)
 void audit_core_dumps(long signr)
 {
 	struct audit_buffer *ab;
-	u32 sid;
-	uid_t auid = audit_get_loginuid(current), uid;
-	gid_t gid;
-	unsigned int sessionid = audit_get_sessionid(current);
 
 	if (!audit_enabled)
 		return;
@@ -2518,24 +2542,20 @@ void audit_core_dumps(long signr)
 		return;
 
 	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_ANOM_ABEND);
-	current_uid_gid(&uid, &gid);
-	audit_log_format(ab, "auid=%u uid=%u gid=%u ses=%u",
-			 auid, uid, gid, sessionid);
-	security_task_getsecid(current, &sid);
-	if (sid) {
-		char *ctx = NULL;
-		u32 len;
+	audit_log_abend(ab, "memory violation", signr);
+	audit_log_end(ab);
+}
 
-		if (security_secid_to_secctx(sid, &ctx, &len))
-			audit_log_format(ab, " ssid=%u", sid);
-		else {
-			audit_log_format(ab, " subj=%s", ctx);
-			security_release_secctx(ctx, len);
-		}
-	}
-	audit_log_format(ab, " pid=%d comm=", current->pid);
-	audit_log_untrustedstring(ab, current->comm);
-	audit_log_format(ab, " sig=%ld", signr);
+void __audit_seccomp(unsigned long syscall, long signr, int code)
+{
+	struct audit_buffer *ab;
+
+	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_ANOM_ABEND);
+	audit_log_abend(ab, "seccomp", signr);
+	audit_log_format(ab, " syscall=%ld", syscall);
+	audit_log_format(ab, " compat=%d", is_compat_task());
+	audit_log_format(ab, " ip=0x%lx", KSTK_EIP(current));
+	audit_log_format(ab, " code=0x%x", code);
 	audit_log_end(ab);
 }
 

@@ -1063,7 +1063,7 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 	int ret = 0;
 
 	/* do the secure computing check first */
-	secure_computing(regs->u_regs[UREG_G1]);
+	secure_computing_strict(regs->u_regs[UREG_G1]);
 
 	if (test_thread_flag(TIF_SYSCALL_TRACE))
 		ret = tracehook_report_syscall_entry(regs);
@@ -1086,17 +1086,8 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 
 asmlinkage void syscall_trace_leave(struct pt_regs *regs)
 {
-#ifdef CONFIG_AUDITSYSCALL
-	if (unlikely(current->audit_context)) {
-		unsigned long tstate = regs->tstate;
-		int result = AUDITSC_SUCCESS;
+	audit_syscall_exit(regs);
 
-		if (unlikely(tstate & (TSTATE_XCARRY | TSTATE_ICARRY)))
-			result = AUDITSC_FAILURE;
-
-		audit_syscall_exit(result, regs->u_regs[UREG_I0]);
-	}
-#endif
 	if (unlikely(test_thread_flag(TIF_SYSCALL_TRACEPOINT)))
 		trace_sys_exit(regs, regs->u_regs[UREG_G1]);
 

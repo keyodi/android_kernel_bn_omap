@@ -166,6 +166,7 @@ static struct sg_table *omap_tiler_map_dma(struct omap_tiler_info *info,
 						struct ion_buffer *buffer)
 {
 	struct sg_table *table;
+	struct scatterlist* sg_temp;
 	int ret, i;
 
 	if (buffer->sg_table) {
@@ -192,9 +193,11 @@ static struct sg_table *omap_tiler_map_dma(struct omap_tiler_info *info,
 		return table;
 	}
 
+	sg_temp = table->sgl;
 	for (i = 0; i < info->n_tiler_pages; i++) {
-		sg_set_page(table->sgl, phys_to_page(info->tiler_addrs[i]),
+		sg_set_page(sg_temp, phys_to_page(info->tiler_addrs[i]),
 			    PAGE_SIZE, 0);
+		sg_temp = sg_next(sg_temp);
 	}
 	return table;
 }
@@ -319,8 +322,11 @@ int omap_tiler_alloc(struct ion_heap *heap,
 	buffer->size = v_size;
 	buffer->priv_virt = info;
 	sg_table = omap_tiler_map_dma(info, buffer);
-	if (IS_ERR(sg_table))
+	if (IS_ERR(sg_table)) {
+		ret = PTR_ERR(sg_table);
+		pr_err("%s: failed to map DMA buffers\n", __func__);
 		goto err;
+	}
 	buffer->sg_table = sg_table;
 	data->handle = handle;
 	data->offset = (size_t)(info->tiler_start & ~PAGE_MASK);

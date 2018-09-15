@@ -723,7 +723,7 @@ asmlinkage long do_syscall_trace_enter(struct pt_regs *regs)
 	long ret = 0;
 
 	/* Do the secure computing check first. */
-	secure_computing(regs->gprs[2]);
+	secure_computing_strict(regs->gprs[2]);
 
 	/*
 	 * The sysc_tracesys code in entry.S stored the system
@@ -755,9 +755,7 @@ asmlinkage long do_syscall_trace_enter(struct pt_regs *regs)
 
 asmlinkage void do_syscall_trace_exit(struct pt_regs *regs)
 {
-	if (unlikely(current->audit_context))
-		audit_syscall_exit(AUDITSC_RESULT(regs->gprs[2]),
-				   regs->gprs[2]);
+	audit_syscall_exit(regs);
 
 	if (unlikely(test_thread_flag(TIF_SYSCALL_TRACEPOINT)))
 		trace_sys_exit(regs, regs->gprs[2]);

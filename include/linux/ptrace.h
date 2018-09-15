@@ -47,17 +47,6 @@
 #define PTRACE_GETREGSET	0x4204
 #define PTRACE_SETREGSET	0x4205
 
-/* options set using PTRACE_SETOPTIONS */
-#define PTRACE_O_TRACESYSGOOD	0x00000001
-#define PTRACE_O_TRACEFORK	0x00000002
-#define PTRACE_O_TRACEVFORK	0x00000004
-#define PTRACE_O_TRACECLONE	0x00000008
-#define PTRACE_O_TRACEEXEC	0x00000010
-#define PTRACE_O_TRACEVFORKDONE	0x00000020
-#define PTRACE_O_TRACEEXIT	0x00000040
-
-#define PTRACE_O_MASK		0x0000007f
-
 /* Wait extended result codes for the above trace options.  */
 #define PTRACE_EVENT_FORK	1
 #define PTRACE_EVENT_VFORK	2
@@ -65,6 +54,19 @@
 #define PTRACE_EVENT_EXEC	4
 #define PTRACE_EVENT_VFORK_DONE	5
 #define PTRACE_EVENT_EXIT	6
+#define PTRACE_EVENT_SECCOMP	7
+
+/* options set using PTRACE_SETOPTIONS */
+#define PTRACE_O_TRACESYSGOOD	1
+#define PTRACE_O_TRACEFORK	(1 << PTRACE_EVENT_FORK)
+#define PTRACE_O_TRACEVFORK	(1 << PTRACE_EVENT_VFORK)
+#define PTRACE_O_TRACECLONE	(1 << PTRACE_EVENT_CLONE)
+#define PTRACE_O_TRACEEXEC	(1 << PTRACE_EVENT_EXEC)
+#define PTRACE_O_TRACEVFORKDONE	(1 << PTRACE_EVENT_VFORK_DONE)
+#define PTRACE_O_TRACEEXIT	(1 << PTRACE_EVENT_EXIT)
+#define PTRACE_O_TRACESECCOMP	(1 << PTRACE_EVENT_SECCOMP)
+
+#define PTRACE_O_MASK		0x000000ff
 
 #include <asm/ptrace.h>
 
@@ -79,16 +81,19 @@
 
 #define PT_PTRACED	0x00000001
 #define PT_DTRACE	0x00000002	/* delayed trace (used on m68k, i386) */
-#define PT_TRACESYSGOOD	0x00000004
-#define PT_PTRACE_CAP	0x00000008	/* ptracer can follow suid-exec */
-#define PT_TRACE_FORK	0x00000010
-#define PT_TRACE_VFORK	0x00000020
-#define PT_TRACE_CLONE	0x00000040
-#define PT_TRACE_EXEC	0x00000080
-#define PT_TRACE_VFORK_DONE	0x00000100
-#define PT_TRACE_EXIT	0x00000200
+#define PT_PTRACE_CAP	0x00000004	/* ptracer can follow suid-exec */
 
-#define PT_TRACE_MASK	0x000003f4
+#define PT_OPT_FLAG_SHIFT	3
+/* PT_TRACE_* event enable flags */
+#define PT_EVENT_FLAG(event)	(1 << (PT_OPT_FLAG_SHIFT + (event)))
+#define PT_TRACESYSGOOD		PT_EVENT_FLAG(0)
+#define PT_TRACE_FORK		PT_EVENT_FLAG(PTRACE_EVENT_FORK)
+#define PT_TRACE_VFORK		PT_EVENT_FLAG(PTRACE_EVENT_VFORK)
+#define PT_TRACE_CLONE		PT_EVENT_FLAG(PTRACE_EVENT_CLONE)
+#define PT_TRACE_EXEC		PT_EVENT_FLAG(PTRACE_EVENT_EXEC)
+#define PT_TRACE_VFORK_DONE	PT_EVENT_FLAG(PTRACE_EVENT_VFORK_DONE)
+#define PT_TRACE_EXIT		PT_EVENT_FLAG(PTRACE_EVENT_EXIT)
+#define PT_TRACE_SECCOMP	PT_EVENT_FLAG(PTRACE_EVENT_SECCOMP)
 
 /* single stepping state bits (used on ARM and PA-RISC) */
 #define PT_SINGLESTEP_BIT	31
@@ -98,6 +103,7 @@
 
 #include <linux/compiler.h>		/* For unlikely.  */
 #include <linux/sched.h>		/* For struct task_struct.  */
+#include <linux/err.h>			/* for IS_ERR_VALUE */
 
 
 extern long arch_ptrace(struct task_struct *child, long request,
@@ -137,6 +143,20 @@ int generic_ptrace_pokedata(struct task_struct *tsk, unsigned long addr,
 			    unsigned long data);
 
 /**
+ * ptrace_event_enabled - test whether a ptrace event is enabled
+ * @task: ptracee of interest
+ * @event: %PTRACE_EVENT_* to test
+ *
+ * Test whether @event is enabled for ptracee @task.
+ *
+ * Returns %true if @event is enabled, %false otherwise.
+ */
+static inline bool ptrace_event_enabled(struct task_struct *task, int event)
+{
+	return task->ptrace & PT_EVENT_FLAG(event);
+}
+
+/**
  * task_ptrace - return %PT_* flags that apply to a task
  * @task:	pointer to &task_struct in question
  *
@@ -149,24 +169,23 @@ static inline int task_ptrace(struct task_struct *task)
 
 /**
  * ptrace_event - possibly stop for a ptrace event notification
- * @mask:	%PT_* bit to check in @current->ptrace
- * @event:	%PTRACE_EVENT_* value to report if @mask is set
+ * @event:	%PTRACE_EVENT_* value to report
  * @message:	value for %PTRACE_GETEVENTMSG to return
  *
- * This checks the @mask bit to see if ptrace wants stops for this event.
- * If so we stop, reporting @event and @message to the ptrace parent.
+ * Check whether @event is enabled and, if so, report @event and @message
+ * to the ptrace parent.
  *
  * Returns nonzero if we did a ptrace notification, zero if not.
  *
  * Called without locks.
  */
-static inline int ptrace_event(int mask, int event, unsigned long message)
+static inline int ptrace_event(int event, unsigned long message)
 {
-	if (mask && likely(!(current->ptrace & mask)))
-		return 0;
+	if (likely(!ptrace_event_enabled(current, event)))
+		return false;
 	current->ptrace_message = message;
 	ptrace_notify((event << 8) | SIGTRAP);
-	return 1;
+	return true;
 }
 
 /**
@@ -221,6 +240,15 @@ static inline void ptrace_release_task(struct task_struct *task)
  * syscall handler, or something along those lines).
  */
 #define force_successful_syscall_return() do { } while (0)
+#endif
+
+#ifndef is_syscall_success
+/*
+ * On most systems we can tell if a syscall is a success based on if the retval
+ * is an error value.  On some systems like ia64 and powerpc they have different
+ * indicators of success/failure and must define their own.
+ */
+#define is_syscall_success(regs) (!IS_ERR_VALUE((unsigned long)(regs_return_value(regs))))
 #endif
 
 /*

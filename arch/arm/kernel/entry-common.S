@@ -87,7 +87,7 @@ ENTRY(ret_from_fork)
 	get_thread_info tsk
 	ldr	r1, [tsk, #TI_FLAGS]		@ check for syscall tracing
 	mov	why, #1
-	tst	r1, #_TIF_SYSCALL_TRACE		@ are we tracing syscalls?
+	tst	r1, #_TIF_SYSCALL_WORK		@ are we tracing syscalls?
 	beq	ret_slow_syscall
 	mov	r1, sp
 	mov	r0, #1				@ trace exit [IP = 1]
@@ -435,15 +435,10 @@ ENTRY(vector_swi)
 
 #ifdef CONFIG_SECCOMP
 	tst	r10, #_TIF_SECCOMP
-	beq	1f
-	mov	r0, scno
-	bl	__secure_computing	
-	add	r0, sp, #S_R0 + S_OFF		@ pointer to regs
-	ldmia	r0, {r0 - r3}			@ have to reload r0 - r3
-1:
+	bne	__sys_trace
 #endif
 
-	tst	r10, #_TIF_SYSCALL_TRACE		@ are we tracing syscalls?
+	tst	r10, #_TIF_SYSCALL_WORK		@ are we tracing syscalls?
 	bne	__sys_trace
 
 	cmp	scno, #NR_syscalls		@ check upper syscall limit
